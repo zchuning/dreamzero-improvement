@@ -169,7 +169,6 @@ class ARDroidRoboarenaPolicy:
 
         # Broadcast obs to workers
         broadcast_to_workers(converted_obs)
-
         batch = Batch(obs=converted_obs)
 
         # Distributed forward pass
@@ -247,7 +246,8 @@ class DistributedWorkerLoop:
                     continue
 
                 # signal == 0 → continue with inference
-                batch = receive_from_rank0()
+                obs = receive_from_rank0()
+                batch = Batch(obs=obs)
 
                 dist.barrier()
                 with torch.no_grad():
@@ -276,7 +276,7 @@ def broadcast_to_workers(obs: dict) -> None:
     dist.broadcast(data_tensor, src=0)
 
 
-def receive_from_rank0() -> Batch:
+def receive_from_rank0() -> dict:
     """Receive broadcast data from rank 0 and return as a ``Batch``."""
     size_tensor = torch.zeros(1, dtype=torch.int64, device="cuda")
     dist.broadcast(size_tensor, src=0)
@@ -286,4 +286,4 @@ def receive_from_rank0() -> Batch:
     dist.broadcast(data_tensor, src=0)
 
     obs = pickle.loads(data_tensor.cpu().numpy().tobytes())
-    return Batch(obs=obs)
+    return obs
