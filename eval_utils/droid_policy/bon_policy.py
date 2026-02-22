@@ -28,6 +28,13 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     Generates num_candidates action chunks in parallel, decodes the predicted
     videos, scores them with an external reward model (robometer), and returns
     the action chunk from the highest-scoring candidate.
+
+    Visualization bookkeeping (when ``output_dir`` is set):
+        {output_dir}/ep_{i:04d}_pred.mp4     — best candidate's decoded view,
+                                                concatenated across all inference
+                                                steps within the episode.
+        {output_dir}/ep_{i:04d}_bon/
+            step_{j:04d}.mp4                  — per-step BoN comparison video.
     """
 
     def __init__(
@@ -46,24 +53,37 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             output_dir=output_dir,
         )
 
-        self.num_candidates = num_candidates
-        self.rm_url: str | None = None
+        self._num_candidates = num_candidates
+        self._rm_url: str | None = None
         if rm_host is not None and rm_port is not None:
-            self.rm_url = f"http://{rm_host}:{rm_port}"
+            self._rm_url = f"http://{rm_host}:{rm_port}"
 
         if reward_view not in ("wrist", "left_exterior", "right_exterior", "full_grid"):
             raise ValueError(f"Unknown reward_view: {reward_view!r}")
-        self.reward_view = reward_view
+        self._reward_view = reward_view
+
+        # Episode / step bookkeeping
+        self._episode_idx = 0
+        self._step_idx = 0
+        self._episode_pred_frames: list[np.ndarray] = []
+        
+    # ------------------------------------------------------------------
+    # Observation / action helpers (inherited)
+    # ------------------------------------------------------------------
 
     def repeat_observation(self, obs: dict) -> dict:
         """Repeat observation tensors to create a batch of size num_candidates."""
         repeated_obs = {}
         for k, v in obs.items():
             if isinstance(v, np.ndarray):
-                repeated_obs[k] = np.repeat(v[None], self.num_candidates, axis=0)
+                repeated_obs[k] = np.repeat(v[None], self._num_candidates, axis=0)
             else:
-                repeated_obs[k] = [v for _ in range(self.num_candidates)]
+                repeated_obs[k] = [v for _ in range(self._num_candidates)]
         return repeated_obs
+
+    # ------------------------------------------------------------------
+    # KV-cache management
+    # ------------------------------------------------------------------
 
     def _select_kv_cache(self, best_idx: int) -> None:
         """Replace the action head's KV caches with the best candidate's entry,
@@ -76,7 +96,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         ``clip_feas`` and ``ys`` have leading dim ``B``.
         """
         ah = self._policy.trained_model.action_head
-        B = self.num_candidates
+        B = self._num_candidates
 
         def _select_and_expand(cache: list[torch.Tensor], dim: int = 1) -> list[torch.Tensor]:
             return [t.select(dim, best_idx).unsqueeze(dim).expand_as(t).contiguous()
@@ -96,6 +116,10 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         if ah.ys is not None:
             ah.ys = ah.ys[best_idx:best_idx + 1].expand(B, *ah.ys.shape[1:]).contiguous()
 
+    # ------------------------------------------------------------------
+    # Video decode
+    # ------------------------------------------------------------------
+
     def _decode_video_latents(self, video_pred: torch.Tensor) -> np.ndarray:
         """Decode VAE video latents and extract a single camera view.
 
@@ -104,7 +128,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             Bottom-left  (H:, :W): left exterior
             Bottom-right (H:, W:): right exterior
 
-        Which view is extracted is controlled by ``self.reward_view``:
+        Which view is extracted is controlled by ``self._reward_view``:
             "wrist"           — top half, subsampled to (H, W)
             "left_exterior"   — bottom-left quadrant (H, W)
             "right_exterior"  — bottom-right quadrant (H, W)
@@ -127,11 +151,11 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         H = frames.shape[3] // 2
         W = frames.shape[4] // 2
 
-        if self.reward_view == "wrist":
+        if self._reward_view == "wrist":
             view = frames[:, :, :, :H, ::2]       # undo pixel-doubling
-        elif self.reward_view == "left_exterior":
+        elif self._reward_view == "left_exterior":
             view = frames[:, :, :, H:, :W]
-        elif self.reward_view == "right_exterior":
+        elif self._reward_view == "right_exterior":
             view = frames[:, :, :, H:, W:]
         else:  # full_grid
             view = frames
@@ -139,13 +163,17 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         view = rearrange(view, "B C T H W -> B T H W C")
         return ((view.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)
 
+    # ------------------------------------------------------------------
+    # Reward model scoring
+    # ------------------------------------------------------------------
+
     def _score_single(self, video: np.ndarray, task: str, idx: int) -> tuple[int, float, np.ndarray]:
         """Score a single candidate. Returns (index, final_score, progress_curve)."""
         try:
             progress = get_progress_predictions(
                 video_input=video,
                 task=task,
-                eval_server_url=self.rm_url,
+                eval_server_url=self._rm_url,
             )
             score = progress[-1] if len(progress) > 0 else 0.0
             return idx, score, np.asarray(progress, dtype=np.float32)
@@ -166,7 +194,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             scores: (B,) array of final progress scores
             progress_curves: list of B arrays, each (T,) per-frame progress
         """
-        if self.rm_url is None:
+        if self._rm_url is None:
             raise RuntimeError(
                 "Reward model URL not configured. "
                 "Pass rm_host and rm_port to BestOfNARDroidRoboarenaPolicy."
@@ -188,6 +216,10 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
 
         return scores, progress_curves
 
+    # ------------------------------------------------------------------
+    # Visualization
+    # ------------------------------------------------------------------
+
     def _save_bon_visualization(
         self,
         videos: np.ndarray,
@@ -197,13 +229,12 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     ) -> str | None:
         """Save a two-column video: candidate rollouts (left) + progress plots (right).
 
-        Each row is one candidate. The best candidate gets a green border and
-        a green plot curve. A red dot on each plot tracks the current frame.
+        Saved to ``{output_dir}/ep_{i}_bon/step_{j:04d}.mp4``.
         """
         B, T, H, W, C = videos.shape
         plot_h, plot_w = H, W
 
-        # -- Pre-render base plots (one matplotlib call per candidate) ----------
+        # -- Pre-render base plots (one matplotlib call per candidate) ----
         base_plots: list[np.ndarray] = []
         dot_coords: list[np.ndarray] = []  # (Tp, 2) pixel coords per candidate
 
@@ -253,22 +284,20 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             base_plots.append(buf)
             dot_coords.append(coords)
 
-        # -- Precompute circle mask for the red dot --------------------------
+        # -- Precompute circle mask for the red dot -----------------------
         R = 5
         yy, xx = np.ogrid[-R : R + 1, -R : R + 1]
         circle_mask = (xx * xx + yy * yy) <= R * R
 
         def _stamp_dot(img: np.ndarray, cx: int, cy: int, color=(255, 50, 50)):
             h, w = img.shape[:2]
-            y0 = max(cy - R, 0)
-            y1 = min(cy + R + 1, h)
-            x0 = max(cx - R, 0)
-            x1 = min(cx + R + 1, w)
+            y0, y1 = max(cy - R, 0), min(cy + R + 1, h)
+            x0, x1 = max(cx - R, 0), min(cx + R + 1, w)
             my0, mx0 = y0 - (cy - R), x0 - (cx - R)
             sub = circle_mask[my0 : my0 + y1 - y0, mx0 : mx0 + x1 - x0]
             img[y0:y1, x0:x1][sub] = color
 
-        # -- Compose per-frame output ----------------------------------------
+        # -- Compose per-frame output ------------------------------------
         output_frames: list[np.ndarray] = []
         border = 3
 
@@ -292,14 +321,40 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
 
             output_frames.append(np.vstack(rows))
 
-        # -- Save -------------------------------------------------------------
-        out_dir = self._video_saver._output_dir
-        os.makedirs(out_dir, exist_ok=True)
-        ts = datetime.datetime.now().strftime("%m_%d_%H_%M_%S")
-        path = os.path.join(out_dir, f"bon_vis_{self._call_count:04d}_{ts}.mp4")
+        # -- Save to episode BoN folder ----------------------------------
+        bon_dir = os.path.join(self._output_dir, f"ep_{self._episode_idx:04d}_bon")
+        os.makedirs(bon_dir, exist_ok=True)
+        path = os.path.join(bon_dir, f"step_{self._step_idx:04d}.mp4")
         imageio.mimsave(path, output_frames, fps=3, codec="libx264")
-        logger.info(f"BoN visualization saved: {path}")
+        logger.info(f"BoN visualization: {path}")
         return path
+
+
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+
+    def _reset_state(self, save_video: bool = True) -> None:
+        if save_video and self._output_dir is not None and self._episode_pred_frames:
+            path = os.path.join(self._output_dir, f"ep_{self._episode_idx:04d}_pred.mp4")
+            imageio.mimsave(path, self._episode_pred_frames, fps=5, codec="libx264")
+            logger.info(f"Episode prediction video ({len(self._episode_pred_frames)} frames): {path}")
+
+        self._episode_pred_frames = []
+        self._episode_idx += 1
+        self._step_idx = 0
+
+        # Clear the inherited VideoSaver (we manage saves ourselves)
+        if self._video_saver is not None:
+            self._video_saver.clear()
+
+        self._frame_buffer.clear()
+        self._call_count = 0
+        self._is_first_call = True
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
     def infer(self, obs: dict) -> np.ndarray:
         """Infer with best-of-N selection."""
@@ -352,10 +407,12 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         # Replace KV caches with the best candidate's, expanded to batch size
         self._select_kv_cache(best_idx)
 
-        # Save visualization and best candidate's video latent
-        if self._video_saver is not None:
-            self._video_saver.append(video_pred[best_idx : best_idx + 1])
+        # Accumulate best candidate's frames and save per-step BoN visualization
+        if self._output_dir is not None:
+            self._episode_pred_frames.extend(list(videos[best_idx]))
             self._save_bon_visualization(videos, progress_curves, scores, best_idx)
+
+        self._step_idx += 1
 
         # Extract best candidate's actions (index out the batch dim)
         action_chunk_dict = result_batch.act

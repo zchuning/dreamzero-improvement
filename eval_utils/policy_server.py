@@ -95,13 +95,14 @@ class WebsocketPolicyServer:
                 endpoint = obs["endpoint"]
                 del obs["endpoint"]
                 if endpoint == "reset":
-                    self._policy.reset(obs)
+                    self._policy.reset()
                     to_return = "reset successful"
                 else:
                     action = self._policy.infer(obs)
                     to_return = packer.pack(action)
                 await websocket.send(to_return)
             except websockets.ConnectionClosed:
+                self._policy.reset() # reset policy to flush video
                 logging.info(f"Connection from {websocket.remote_address} closed")
                 break
             except Exception:

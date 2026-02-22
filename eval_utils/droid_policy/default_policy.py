@@ -51,6 +51,7 @@ class ARDroidRoboarenaPolicy:
         self._current_session_id: str | None = None
 
         # Video saving
+        self._output_dir = output_dir
         self._video_saver: VideoSaver | None = None
         if output_dir:
             self._video_saver = VideoSaver(
@@ -205,7 +206,7 @@ class ARDroidRoboarenaPolicy:
         self._call_count = 0
         self._is_first_call = True
 
-    def reset(self, reset_info: dict) -> None:
+    def reset(self) -> None:
         """Reset the policy state for a new episode."""
         self._reset_state(save_video=True)
 
