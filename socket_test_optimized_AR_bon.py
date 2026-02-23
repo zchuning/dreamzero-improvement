@@ -27,7 +27,6 @@ class Args:
     timeout_seconds: int = 50000  # 10 hours default, configurable
     model_path: str = "/mnt/aws-lfs-01/shared/seonghyeony/checkpoints/dreamzero/1105/wan_action_train_i2v_multiview_agibot_diverse_subtask_subsampling_action_OTJ_1104_steps100000_gpus128_bs128_per_device1_shared_time_multiview/copy-ckpt-26000"
     enable_dit_cache: bool = False
-    index: int = 0
     max_chunk_size: int | None = None  # If None, use config value. Otherwise override max_chunk_size for inference.
     num_candidates: int = 4
     rm_host: str = "localhost"
@@ -81,9 +80,9 @@ def main(args: Args) -> None:
     if rank == 0:
         logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
         parent_dir = os.path.dirname(model_path)
-        date_suffix = datetime.datetime.now().strftime("%Y%m%d")
+        datetime_suffix = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         checkpoint_name = os.path.basename(model_path)
-        output_dir = os.path.join(parent_dir, f"real_world_eval_gen_{date_suffix}_{args.index}", checkpoint_name)
+        output_dir = os.path.join(parent_dir, f"real_world_eval_gen_{datetime_suffix}", checkpoint_name)
         os.makedirs(output_dir, exist_ok=True)
         logging.info("Videos will be saved to: %s", output_dir)
     else:
