@@ -48,6 +48,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         rm_port: int | None = None,
         reward_view: str = "left_exterior",
         resample_prompt: bool = False,
+        open_loop_horizon: int = 8,
     ):
         super().__init__(
             groot_policy=groot_policy,
@@ -71,6 +72,10 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
                 client_secret=os.environ.get("LLM_CLIENT_SECRET", "client_secret"),
             )
 
+        # Open-loop action caching
+        self._open_loop_horizon = open_loop_horizon
+        self._cached_actions: np.ndarray | None = None
+        self._cache_offset: int = 0
 
         # Episode / step bookkeeping
         self._episode_idx = 0
@@ -374,6 +379,10 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         self._episode_idx += 1
         self._step_idx = 0
 
+        # Clear action cache
+        self._cached_actions = None
+        self._cache_offset = 0
+
         # Clear the inherited VideoSaver (we manage saves ourselves)
         if self._video_saver is not None:
             self._video_saver.clear()
@@ -387,7 +396,13 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     # ------------------------------------------------------------------
 
     def infer(self, obs: dict) -> np.ndarray:
-        """Infer with best-of-N selection."""
+        """Infer with best-of-N selection and open-loop action caching.
+
+        Each model forward pass produces a full action chunk (e.g. 24 actions).
+        Only ``open_loop_horizon`` actions (e.g. 8) are returned per call.
+        Subsequent calls return the next cached slice without a forward pass,
+        while still accumulating observations for the frame buffer.
+        """
         # Session change detection
         session_id = obs.get("session_id", None)
         if session_id is not None and session_id != self._current_session_id:
@@ -400,7 +415,18 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
 
         self._call_count += 1
 
+        # Always accumulate observations into the frame buffer
         converted_obs = self._convert_observation(obs)
+
+        # Serve from cache if available
+        if self._cached_actions is not None and self._cache_offset < self._cached_actions.shape[0]:
+            end = self._cache_offset + self._open_loop_horizon
+            action = self._cached_actions[self._cache_offset : end]
+            logger.info(f"Returning cached actions [{self._cache_offset}:{end}]")
+            self._cache_offset = end
+            return action
+
+        # Cache exhausted: run full BoN inference
         repeated_obs = self.repeat_observation(converted_obs)
         tasks = repeated_obs.get("annotation.language.action_text", "")
 
@@ -444,16 +470,27 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
 
         self._step_idx += 1
 
-        # Extract best candidate's actions (index out the batch dim)
+        # Extract best candidate's full action chunk
         action_chunk_dict = result_batch.act
         best_action_dict = {}
         for k, v in action_chunk_dict.items():
             if k.startswith("action."):
                 best_action_dict[k] = v[best_idx]
 
-        action = self._convert_action(best_action_dict)
+        full_action = self._convert_action(best_action_dict)  # (N, 8)
+
+        # Validate divisibility
+        N = full_action.shape[0]
+        assert N % self._open_loop_horizon == 0, (
+            f"Action chunk size {N} is not divisible by open_loop_horizon "
+            f"{self._open_loop_horizon}"
+        )
+
+        # Cache full chunk, return first slice
+        self._cached_actions = full_action
+        self._cache_offset = self._open_loop_horizon
 
         if self._is_first_call:
             self._is_first_call = False
 
-        return action
+        return full_action[: self._open_loop_horizon]

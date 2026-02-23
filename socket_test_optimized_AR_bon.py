@@ -32,6 +32,7 @@ class Args:
     rm_host: str = "localhost"
     rm_port: int = 8004
     resample_prompt: bool = False
+    open_loop_horizon: int = 8
 
 
 def init_mesh() -> DeviceMesh:
@@ -99,6 +100,7 @@ def main(args: Args) -> None:
             rm_host=args.rm_host,
             rm_port=args.rm_port,
             resample_prompt=args.resample_prompt,
+            open_loop_horizon=args.open_loop_horizon,
         )
 
         server_config = PolicyServerConfig(
