@@ -31,6 +31,7 @@ class Args:
     num_candidates: int = 4
     rm_host: str = "localhost"
     rm_port: int = 8004
+    resample_prompt: bool = False
 
 
 def init_mesh() -> DeviceMesh:
@@ -97,6 +98,7 @@ def main(args: Args) -> None:
             num_candidates=args.num_candidates,
             rm_host=args.rm_host,
             rm_port=args.rm_port,
+            resample_prompt=args.resample_prompt,
         )
 
         server_config = PolicyServerConfig(

@@ -16,6 +16,7 @@ from tianshou.data import Batch
 matplotlib.use("Agg")
 
 from groot.vla.model.n1_5.sim_policy import GrootSimPolicy
+from groot.vla.common.utils.llm_api import LLMClient, ask
 from .default_policy import ARDroidRoboarenaPolicy, broadcast_to_workers
 from .reward_utils import get_progress_predictions
 
@@ -46,6 +47,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         rm_host: str | None = None,
         rm_port: int | None = None,
         reward_view: str = "left_exterior",
+        resample_prompt: bool = True,
     ):
         super().__init__(
             groot_policy=groot_policy,
@@ -61,6 +63,14 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         if reward_view not in ("wrist", "left_exterior", "right_exterior", "full_grid"):
             raise ValueError(f"Unknown reward_view: {reward_view!r}")
         self._reward_view = reward_view
+
+        self._resample_prompt = resample_prompt
+        if resample_prompt:
+            self._llm_client = LLMClient(
+                client_id=os.environ.get("LLM_CLIENT_ID", "client_id"),
+                client_secret=os.environ.get("LLM_CLIENT_SECRET", "client_secret"),
+            )
+
 
         # Episode / step bookkeeping
         self._episode_idx = 0
@@ -78,7 +88,27 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             if isinstance(v, np.ndarray):
                 repeated_obs[k] = np.repeat(v[None], self._num_candidates, axis=0)
             else:
-                repeated_obs[k] = [v for _ in range(self._num_candidates)]
+                if k == "annotation.language.action_text" and self._resample_prompt:
+                    # Resample the prompt for each candidate
+                    response = ask(
+                        self._llm_client,
+                        message=f"Resample the following instruction for {self._num_candidates} times: {v}",
+                        model="gpt-4o",
+                        system_prompt="Resample the instruction for a robotic foundation model with different wording but the same meaning. " \
+                            "Only return the resampled instructions, without any additional commentary. " \
+                            "If multiple candidates are requested, separate them with newlines and omit any numbering or bullet points.",
+                        temperature=0.7,
+                    )
+                    # Parse newline-separated prompts, pad/truncate to num_candidates
+                    prompts = [line.strip() for line in response.strip().split("\n") if line.strip()]
+                    if len(prompts) >= self._num_candidates:
+                        prompts = prompts[: self._num_candidates]
+                    else:
+                        prompts.extend([v] * (self._num_candidates - len(prompts)))
+                    repeated_obs[k] = prompts
+                    logger.info(f"Resampled prompts: {prompts}")
+                else:
+                    repeated_obs[k] = [v for _ in range(self._num_candidates)]
         return repeated_obs
 
     # ------------------------------------------------------------------
