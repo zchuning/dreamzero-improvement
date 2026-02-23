@@ -47,7 +47,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         rm_host: str | None = None,
         rm_port: int | None = None,
         reward_view: str = "left_exterior",
-        resample_prompt: bool = True,
+        resample_prompt: bool = False,
     ):
         super().__init__(
             groot_policy=groot_policy,
