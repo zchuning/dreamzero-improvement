@@ -54,6 +54,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             groot_policy=groot_policy,
             signal_group=signal_group,
             output_dir=output_dir,
+            open_loop_horizon=open_loop_horizon,
         )
 
         self._num_candidates = num_candidates
@@ -72,15 +73,6 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
                 client_secret=os.environ.get("LLM_CLIENT_SECRET", "client_secret"),
             )
 
-        # Open-loop action caching
-        self._open_loop_horizon = open_loop_horizon
-        self._cached_actions: np.ndarray | None = None
-        self._cache_offset: int = 0
-
-        # Episode / step bookkeeping
-        self._episode_idx = 0
-        self._step_idx = 0
-        self._episode_pred_frames: list[np.ndarray] = []
         
     # ------------------------------------------------------------------
     # Observation / action helpers (inherited)
@@ -88,6 +80,9 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
 
     def repeat_observation(self, obs: dict) -> dict:
         """Repeat observation tensors to create a batch of size num_candidates."""
+        if self._num_candidates <= 1:
+            return obs
+        
         repeated_obs = {}
         for k, v in obs.items():
             if isinstance(v, np.ndarray):
@@ -383,10 +378,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         self._cached_actions = None
         self._cache_offset = 0
 
-        # Clear the inherited VideoSaver (we manage saves ourselves)
-        if self._video_saver is not None:
-            self._video_saver.clear()
-
+        # Cear frame buffer
         self._frame_buffer.clear()
         self._call_count = 0
         self._is_first_call = True

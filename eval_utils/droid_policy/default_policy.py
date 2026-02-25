@@ -1,15 +1,17 @@
 import logging
+import os
 import pickle
 import traceback
 
-
+import imageio
 import numpy as np
 import torch
 import torch.distributed as dist
+from einops import rearrange
 from tianshou.data import Batch
 
 from groot.vla.model.n1_5.sim_policy import GrootSimPolicy
-from .utils import FrameBuffer, VideoSaver
+from .utils import FrameBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ class ARDroidRoboarenaPolicy:
         groot_policy: GrootSimPolicy,
         signal_group: dist.ProcessGroup,
         output_dir: str | None = None,
+        open_loop_horizon: int | None = None,
     ) -> None:
         self._policy = groot_policy
         self._signal_group = signal_group
@@ -50,13 +53,16 @@ class ARDroidRoboarenaPolicy:
         # Session tracking
         self._current_session_id: str | None = None
 
+        # Open-loop action caching
+        self._open_loop_horizon = open_loop_horizon
+        self._cached_actions: np.ndarray | None = None
+        self._cache_offset: int = 0
+
         # Video saving
         self._output_dir = output_dir
-        self._video_saver: VideoSaver | None = None
-        if output_dir:
-            self._video_saver = VideoSaver(
-                output_dir, groot_policy.trained_model.action_head
-            )
+        self._episode_idx = 0
+        self._step_idx = 0
+        self._episode_pred_frames: list[np.ndarray] = []
 
     def _convert_observation(self, obs: dict) -> dict:
         """Convert roboarena observation format to AR_droid format.
@@ -115,6 +121,26 @@ class ARDroidRoboarenaPolicy:
 
         return converted
 
+    def _decode_video_latents(self, video_pred: torch.Tensor) -> np.ndarray:
+        """Decode VAE video latents to pixel frames.
+
+        Args:
+            video_pred: (B, C, T, H_latent, W_latent) latent tensor
+
+        Returns:
+            (B, T, H, W, C) uint8 numpy array (full 2x2 grid of views)
+        """
+        ah = self._policy.trained_model.action_head
+        frames = ah.vae.decode(
+            video_pred,
+            tiled=ah.tiled,
+            tile_size=(ah.tile_size_height, ah.tile_size_width),
+            tile_stride=(ah.tile_stride_height, ah.tile_stride_width),
+        )
+        # frames: (B, C, T, 2H, 2W)
+        view = rearrange(frames, "B C T H W -> B T H W C")
+        return ((view.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)
+
     def _convert_action(self, action_dict: dict) -> np.ndarray:
         """Convert AR_droid action dict to roboarena (N, 8) array."""
         joint_action = None
@@ -162,7 +188,20 @@ class ARDroidRoboarenaPolicy:
 
         self._call_count += 1
 
+        # Always accumulate observations into the frame buffer
         converted_obs = self._convert_observation(obs)
+
+        # Serve from cache if available
+        if (
+            self._open_loop_horizon is not None
+            and self._cached_actions is not None
+            and self._cache_offset < self._cached_actions.shape[0]
+        ):
+            end = self._cache_offset + self._open_loop_horizon
+            action = self._cached_actions[self._cache_offset : end]
+            logger.info(f"Returning cached actions [{self._cache_offset}:{end}]")
+            self._cache_offset = end
+            return action
 
         # Signal workers to continue (0 = continue)
         signal_tensor = torch.zeros(1, dtype=torch.int32, device="cpu")
@@ -178,9 +217,11 @@ class ARDroidRoboarenaPolicy:
             result_batch, video_pred = self._policy.lazy_joint_forward_causal(batch)
         dist.barrier()
 
-        # Accumulate video latents
-        if self._video_saver is not None:
-            self._video_saver.append(video_pred)
+        # Decode video latents: (B, C, T, H, W) -> (B, T, H, W, C) uint8
+        with torch.no_grad():
+            videos = self._decode_video_latents(video_pred)
+        if self._output_dir is not None:
+            self._episode_pred_frames.extend(list(videos[0]))
 
         # Extract and convert action
         action_chunk_dict = result_batch.act
@@ -189,22 +230,38 @@ class ARDroidRoboarenaPolicy:
             if k.startswith("action."):
                 action_dict[k] = getattr(action_chunk_dict, k)
 
-        action = self._convert_action(action_dict)
+        full_action = self._convert_action(action_dict)
 
         if self._is_first_call:
             self._is_first_call = False
 
-        return action
+        # If open-loop caching is enabled, cache and return first slice
+        if self._open_loop_horizon is not None:
+            self._cached_actions = full_action
+            self._cache_offset = self._open_loop_horizon
+            return full_action[: self._open_loop_horizon]
+
+        return full_action
 
     def _reset_state(self, save_video: bool = True) -> None:
-        if save_video and self._video_saver is not None:
-            self._video_saver.save_and_clear(reason="reset")
-        elif self._video_saver is not None:
-            self._video_saver.clear()
+        if save_video and self._output_dir is not None and self._episode_pred_frames:
+            path = os.path.join(self._output_dir, f"ep_{self._episode_idx:04d}_pred.mp4")
+            imageio.mimsave(path, self._episode_pred_frames, fps=5, codec="libx264")
+            logger.info(f"Episode prediction video ({len(self._episode_pred_frames)} frames): {path}")
+        
+        self._episode_pred_frames = []
+        self._episode_idx += 1
+        self._step_idx = 0
 
+        # Clear action cache
+        self._cached_actions = None
+        self._cache_offset = 0
+
+        # Cear frame buffer
         self._frame_buffer.clear()
         self._call_count = 0
         self._is_first_call = True
+
 
     def reset(self) -> None:
         """Reset the policy state for a new episode."""
