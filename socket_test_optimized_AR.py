@@ -28,7 +28,7 @@ class Args:
     model_path: str = "/mnt/aws-lfs-01/shared/seonghyeony/checkpoints/dreamzero/1105/wan_action_train_i2v_multiview_agibot_diverse_subtask_subsampling_action_OTJ_1104_steps100000_gpus128_bs128_per_device1_shared_time_multiview/copy-ckpt-26000"
     enable_dit_cache: bool = False
     max_chunk_size: int | None = None  # If None, use config value. Otherwise override max_chunk_size for inference.
-    open_loop_horizon: int | None = None  # If set, cache the full action chunk and return slices of this size.
+    open_loop_horizon: int = 8  # If set, cache the full action chunk and return slices of this size.
 
 
 def init_mesh() -> DeviceMesh:
