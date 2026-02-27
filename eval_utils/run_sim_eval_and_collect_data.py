@@ -98,6 +98,10 @@ class DreamZeroJointPosClient(InferenceClient):
         right_image = obs_dict["policy"]["external_cam"][0].clone().detach().cpu().numpy()
         left_image = obs_dict["policy"]["external_cam_2"][0].clone().detach().cpu().numpy()
         wrist_image = obs_dict["policy"]["wrist_cam"][0].clone().detach().cpu().numpy()
+        # Resize images to 320x180 to match the base DROID dataset resolution
+        right_image = cv2.resize(right_image, (320, 180), interpolation=cv2.INTER_AREA)
+        left_image = cv2.resize(left_image, (320, 180), interpolation=cv2.INTER_AREA)
+        wrist_image = cv2.resize(wrist_image, (320, 180), interpolation=cv2.INTER_AREA)
         robot_state = obs_dict["policy"]
         joint_position = robot_state["arm_joint_pos"].clone().detach().cpu().numpy()
         gripper_position = robot_state["gripper_pos"].clone().detach().cpu().numpy()
