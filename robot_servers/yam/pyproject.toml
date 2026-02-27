@@ -1,0 +1,63 @@
+[project]
+name = "yam-control"
+version = "0.1.0"
+description = "Control framework for the YAM bimanual robot: data collection and policy rollout."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "gymnasium>=1.2.0",
+    "numpy>=2.0.0",
+    "opencv-python>=4.10.0",
+    "packaging",
+    "portal>=3.7.3",
+    "prompt-toolkit",
+    "pyrealsense2>=2.56; sys_platform == 'linux'",
+    "tyro",
+]
+
+[project.optional-dependencies]
+convert = [
+    "av",
+    "pandas",
+    "pyarrow",
+    "tqdm",
+]
+arm-server = [
+    "i2rt @ git+https://github.com/i2rt-robotics/i2rt.git@7809b5b",
+]
+eval = [
+    "i2rt @ git+https://github.com/i2rt-robotics/i2rt.git@7809b5b",
+    "pyroki @ git+https://github.com/chungmin99/pyroki.git@70b30a5",
+    "scipy",
+    "trimesh",
+    "viser>=0.2.0",
+    "yourdfpy",
+]
+sim = [
+    "mujoco>=3.0",
+]
+kinematics = [
+    "mink",
+    "mujoco>=3.0",
+]
+dataset-replay = [
+    "pandas",
+    "pyarrow",
+]
+server-eval = [
+    "pyzmq",
+    "msgpack",
+]
+
+[project.scripts]
+yam-calibration-check = "yam_control.scripts.daily_calibration_check:cli"
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["yam_control*"]
+
+[tool.setuptools.package-data]
+yam_control = ["models/*.xml", "models/*.urdf", "models/*.stl", "models/assets/*.stl"]
