@@ -376,13 +376,17 @@ class VLA(PreTrainedModel):
         config = VLAConfig(**config_dict)
         print("loading model")
 
+        # Always disable defer_lora_injection so LoRA adapters are created during model construction
+        if 'config' in config.action_head_cfg and isinstance(config.action_head_cfg['config'], dict):
+            if 'defer_lora_injection' in config.action_head_cfg['config']:
+                config.action_head_cfg['config']['defer_lora_injection'] = False
+                print("config.action_head_cfg['config']['defer_lora_injection'] disabled (set to False)")
+        elif 'defer_lora_injection' in config.action_head_cfg:
+            config.action_head_cfg['defer_lora_injection'] = False
+            print("config.action_head_cfg['defer_lora_injection'] disabled (set to False)")
+
         # Instantiate model
         model = cls(config)
-
-        print("model", model)
-        
-        print("main network", model.action_head.model.blocks[8].cross_attn.k.weight.shape, model.action_head.model.blocks[8].cross_attn.k.weight[0,0:10])
-        print("lora weight before", model.action_head.model.blocks[8].self_attn.k.lora_A.default.weight[0,0:10])
 
         # Rewrite keys for loading the LoRA weights due to PEFT wrapping.
         # If a model is PEFT wrapped, the module hierarchy is changed by the PEFT library.
@@ -407,8 +411,6 @@ class VLA(PreTrainedModel):
 
         # Load weights
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-        print("main network after", model.action_head.model.blocks[8].cross_attn.k.weight.shape, model.action_head.model.blocks[8].cross_attn.k.weight[0,0:10])
-        print("lora weight", model.action_head.model.blocks[8].self_attn.k.lora_A.default.weight[0,0:10])
             
         if missing_keys:
             print(f"Missing keys when loading pretrained weights: {missing_keys}")

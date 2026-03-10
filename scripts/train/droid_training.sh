@@ -52,7 +52,7 @@ if [ ! -d "$DROID_DATA_ROOT" ]; then
 fi
 
 torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment.py \
-    report_to=none \
+    report_to=wandb \
     data=dreamzero/droid_relative \
     wandb_project=dreamzero \
     train_architecture=lora \
@@ -68,11 +68,11 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     seed=42 \
     training_args.learning_rate=1e-5 \
     training_args.deepspeed="groot/vla/configs/deepspeed/zero2.json" \
-    save_steps=1000 \
+    save_steps=500 \
     training_args.warmup_ratio=0.05 \
     output_dir=$OUTPUT_DIR \
     per_device_train_batch_size=1 \
-    max_steps=100 \
+    max_steps=2000 \
     weight_decay=1e-5 \
     save_total_limit=10 \
     upload_checkpoints=false \
@@ -86,10 +86,13 @@ torchrun --nproc_per_node $NUM_GPUS --standalone groot/vla/experiment/experiment
     save_lora_only=true \
     max_chunk_size=4 \
     frame_seqlen=880 \
-    save_strategy=no \
+    save_strategy=steps \
     droid_data_root=$DROID_DATA_ROOT \
     dit_version=$WAN_CKPT_DIR \
     text_encoder_pretrained_path=$WAN_CKPT_DIR/models_t5_umt5-xxl-enc-bf16.pth \
     image_encoder_pretrained_path=$WAN_CKPT_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth \
     vae_pretrained_path=$WAN_CKPT_DIR/Wan2.1_VAE.pth \
-    tokenizer_path=$TOKENIZER_DIR
+    tokenizer_path=$TOKENIZER_DIR \
+    use_global_metadata=true \
+    disable_action_loss=false \
+    pretrained_model_path=/mnt/aws-lfs-02/shared/chuningz/checkpoints/dreamzero_ckpts/droid_release

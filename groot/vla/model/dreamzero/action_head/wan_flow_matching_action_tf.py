@@ -136,6 +136,7 @@ class WANPolicyHeadConfig(PretrainedConfig):
     freeze_decode_layer: bool = field(default=False)
     expand_batch: int = field(default=None)
     use_vlln: bool = field(default=True)
+    disable_action_loss: bool = field(default=False, metadata={"help": "If True, zero out the action loss (train video/dynamics only)."})
     defer_lora_injection: bool = field(default=False, metadata={"help": "Defer LoRA injection until after loading pretrained weights."})
 
     vl_self_attention_cfg: dict = field(default=None)
@@ -744,7 +745,7 @@ class WANPolicyHead(ActionHead):
             weight_dynamics = dynamics_loss_per_sample * self.scheduler.training_weight(timestep.flatten(0, 1)).unflatten(0, (noise.shape[0], noise.shape[1])).to(self._device)
             weighted_dynamics_loss = weight_dynamics.mean()
             
-            if actions.numel() > 0:
+            if actions.numel() > 0 and not self.config.disable_action_loss:
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]

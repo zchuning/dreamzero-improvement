@@ -694,6 +694,10 @@ class BaseExperiment(ABC):
             from groot.vla.model.dreamzero.base_vla import VLA
             mprint(f"Loading model from pretrained_model_path: {cfg.pretrained_model_path}")
             model = VLA.from_pretrained(cfg.pretrained_model_path)
+            # Apply CLI overrides that aren't in the saved checkpoint config
+            if cfg.disable_action_loss:
+                model.action_head.config.disable_action_loss = True
+                mprint("disable_action_loss=True applied to loaded model")
         else:
             model = instantiate(cfg.model)
         model.config.resume_path = model.config._name_or_path = training_args.output_dir

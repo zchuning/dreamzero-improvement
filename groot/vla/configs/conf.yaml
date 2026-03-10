@@ -81,6 +81,7 @@ torch_compile_mode: null
 
 pretrained_model_path: null
 only_tune_projectors: false
+disable_action_loss: false
 
 save_llm: false
 save_lora_only: false

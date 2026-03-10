@@ -39,6 +39,7 @@ action_head_cfg:
     max_state_dim: ${max_state_dim}
     max_action_dim: ${max_action_dim}
     action_loss_embodiment_ids: [26, 17]
+    disable_action_loss: ${disable_action_loss}
     hidden_size: ${hidden_size}
     input_embedding_dim: 1536
     backbone_embedding_dim: ${backbone_hidden_size}
