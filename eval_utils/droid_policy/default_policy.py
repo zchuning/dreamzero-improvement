@@ -42,9 +42,13 @@ class ARDroidRoboarenaPolicy:
         signal_group: dist.ProcessGroup,
         output_dir: str | None = None,
         open_loop_horizon: int | None = None,
+        return_conditioned: bool = False,
+        return_condition_value: float = 1.0,
     ) -> None:
         self._policy = groot_policy
         self._signal_group = signal_group
+        self._return_conditioned = return_conditioned
+        self._return_condition_value = return_condition_value
 
         self._frame_buffer = FrameBuffer(_DROID_CAMERA_KEYS, self.FRAMES_PER_CHUNK)
         self._call_count = 0
@@ -117,7 +121,10 @@ class ARDroidRoboarenaPolicy:
             converted["state.gripper_position"] = np.zeros((1, 1), dtype=np.float64)
 
         # Prompt
-        converted["annotation.language.action_text"] = obs.get("prompt", "")
+        prompt = obs.get("prompt", "")
+        if self._return_conditioned and prompt:
+            prompt = f"complete {prompt} with return {self._return_condition_value:.1f}"
+        converted["annotation.language.action_text"] = prompt
 
         return converted
 

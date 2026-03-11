@@ -101,6 +101,11 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
                         # If it's already a scalar (string, float, int, etc.), convert to string
                         processed_item = str(parsed_item)
                     
+                    # Return-conditioned BC: append return value to task text
+                    if "mc_return" in elem:
+                        ret_val = float(elem["mc_return"])
+                        processed_item = f"complete {processed_item} with return {ret_val:.1f}"
+
                     if num_views > 1 and elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.AGIBOT.value]:
                         processed_item = "A multi-view video shows that a robot " + processed_item.lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + processed_item.lower()
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.OXE_DROID.value]:
@@ -116,11 +121,15 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
                         processed_item = "A single view video shows that a human " + processed_item.lower()
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.XDOF.value]:
                         processed_item = "A multi-view video shows that a robot " + processed_item.lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + processed_item.lower()
-                    else: 
-                        raise ValueError(f"Embodiment ID {elem['embodiment_id']} not supported.") 
-                    output_values.append(processed_item)  
+                    else:
+                        raise ValueError(f"Embodiment ID {elem['embodiment_id']} not supported.")
+                    output_values.append(processed_item)
                 except (ValueError, SyntaxError, TypeError):
                     # If parsing fails or item is already a string, use it directly
+                    # Return-conditioned BC: append return value to task text
+                    if "mc_return" in elem:
+                        ret_val = float(elem["mc_return"])
+                        item = f"complete {item} with return {ret_val:.1f}"
                     if num_views > 1 and elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.AGIBOT.value]:
                         item = "A multi-view video shows that a robot " + str(item).lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + str(item).lower()
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.OXE_DROID.value]:
@@ -588,6 +597,12 @@ class DreamTransform(InvertibleModalityTransform):
                 transformed_data[key].shape == transformed_data["action"].shape
                 for key in action_and_mask_keys
             ), f"Shape mismatch: {[(key, transformed_data[key].shape) for key in action_and_mask_keys]}"
+
+        # Pass through reward-weighted BC fields
+        if "reward_weight" in data:
+            transformed_data["reward_weight"] = data["reward_weight"]
+        if "mc_return" in data:
+            transformed_data["mc_return"] = data["mc_return"]
 
         return transformed_data
 

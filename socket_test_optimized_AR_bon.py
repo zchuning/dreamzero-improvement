@@ -33,6 +33,8 @@ class Args:
     rm_port: int = 8004
     resample_prompt: bool = False
     open_loop_horizon: int = 8
+    return_conditioned: bool = False  # If True, condition prompt with "complete <task> with return <value>"
+    return_condition_value: float = 1.0  # Return value to condition on (typically 1.0 for best behavior)
 
 
 def init_mesh() -> DeviceMesh:
@@ -101,6 +103,8 @@ def main(args: Args) -> None:
             rm_port=args.rm_port,
             resample_prompt=args.resample_prompt,
             open_loop_horizon=args.open_loop_horizon,
+            return_conditioned=args.return_conditioned,
+            return_condition_value=args.return_condition_value,
         )
 
         server_config = PolicyServerConfig(

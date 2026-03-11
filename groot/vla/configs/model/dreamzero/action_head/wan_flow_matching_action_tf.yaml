@@ -107,3 +107,7 @@ action_head_cfg:
 
     tune_projector: true
     tune_diffusion_model: true
+
+    # Reward-weighted behavior cloning
+    reward_weighting_mode: ${reward_weighting_mode}
+    reward_softmax_temperature: ${reward_softmax_temperature}

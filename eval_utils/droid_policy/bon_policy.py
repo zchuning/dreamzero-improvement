@@ -1,4 +1,3 @@
-import datetime
 import logging
 import os
 import time
@@ -18,7 +17,7 @@ matplotlib.use("Agg")
 from groot.vla.model.n1_5.sim_policy import GrootSimPolicy
 from groot.vla.common.utils.llm_api import LLMClient, ask
 from .default_policy import ARDroidRoboarenaPolicy, broadcast_to_workers
-from .reward_utils import get_progress_predictions
+from .robometer_client import RobometerClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     """AR_droid policy with best-of-N sampling via a reward model.
 
-    Generates num_candidates action chunks in parallel, decodes the predicted
+    Generates num_candiCan s action chunks in parallel, decodes the predicted
     videos, scores them with an external reward model (robometer), and returns
     the action chunk from the highest-scoring candidate.
 
@@ -46,9 +45,12 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         num_candidates: int = 4,
         rm_host: str | None = None,
         rm_port: int | None = None,
+        rm_max_frames: int = 8,
         reward_view: str = "left_exterior",
         resample_prompt: bool = False,
         open_loop_horizon: int = 8,
+        return_conditioned: bool = False,
+        return_condition_value: float = 1.0,
     ):
         super().__init__(
             groot_policy=groot_policy,
@@ -58,15 +60,18 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
         )
 
         self._num_candidates = num_candidates
-        self._rm_url: str | None = None
+        self._rm_max_frames = rm_max_frames
+        self._rm_client: RobometerClient | None = None
         if rm_host is not None and rm_port is not None:
-            self._rm_url = f"http://{rm_host}:{rm_port}"
+            self._rm_client = RobometerClient(host=rm_host, port=rm_port)
 
         if reward_view not in ("wrist", "left_exterior", "right_exterior", "full_grid"):
             raise ValueError(f"Unknown reward_view: {reward_view!r}")
         self._reward_view = reward_view
 
         self._resample_prompt = resample_prompt
+        self._return_conditioned = return_conditioned
+        self._return_condition_value = return_condition_value
         if resample_prompt:
             self._llm_client = LLMClient(
                 client_id=os.environ.get("LLM_CLIENT_ID", "client_id"),
@@ -78,11 +83,21 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     # Observation / action helpers (inherited)
     # ------------------------------------------------------------------
 
+    def _apply_return_conditioning(self, prompt: str) -> str:
+        """Wrap the task prompt with return conditioning, matching training format."""
+        if not self._return_conditioned:
+            return prompt
+        return f"complete {prompt} with return {self._return_condition_value:.1f}"
+
     def repeat_observation(self, obs: dict) -> dict:
         """Repeat observation tensors to create a batch of size num_candidates."""
-        if self._num_candidates <= 1:
-            return obs
-        
+        # Apply return conditioning to the prompt before repeating
+        if self._return_conditioned and "annotation.language.action_text" in obs:
+            obs = dict(obs)  # shallow copy to avoid mutating caller's dict
+            obs["annotation.language.action_text"] = self._apply_return_conditioning(
+                obs["annotation.language.action_text"]
+            )
+
         repeated_obs = {}
         for k, v in obs.items():
             if isinstance(v, np.ndarray):
@@ -197,16 +212,21 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     # Reward model scoring
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _subsample_frames(frames: np.ndarray, max_frames: int) -> np.ndarray:
+        """Uniformly subsample frames along the time axis using linspace."""
+        T = frames.shape[0]
+        if T <= max_frames:
+            return frames
+        indices = np.linspace(0, T - 1, max_frames, dtype=int)
+        return frames[indices]
+
     def _score_single(self, video: np.ndarray, task: str, idx: int) -> tuple[int, float, np.ndarray]:
         """Score a single candidate. Returns (index, final_score, progress_curve)."""
         try:
-            progress = get_progress_predictions(
-                video_input=video,
-                task=task,
-                eval_server_url=self._rm_url,
-            )
-            score = progress[-1] if len(progress) > 0 else 0.0
-            return idx, score, np.asarray(progress, dtype=np.float32)
+            scored_video = self._subsample_frames(video, self._rm_max_frames)
+            result = self._rm_client.score(obs=scored_video, task=task)
+            return idx, result.score, np.asarray(result.scores, dtype=np.float32)
         except Exception as e:
             logger.warning(f"Reward scoring failed for candidate {idx}: {e}")
             return idx, 0.0, np.zeros(video.shape[0], dtype=np.float32)
@@ -214,7 +234,7 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
     def _score_candidates(
         self, videos: np.ndarray, tasks: list[str],
     ) -> tuple[np.ndarray, list[np.ndarray]]:
-        """Score each candidate video via the reward model server (parallel).
+        """Score each candidate video via the RobometerClient (sequential).
 
         Args:
             videos: (B, T, H, W, C) uint8 frames
@@ -224,9 +244,9 @@ class BestOfNARDroidRoboarenaPolicy(ARDroidRoboarenaPolicy):
             scores: (B,) array of final progress scores
             progress_curves: list of B arrays, each (T,) per-frame progress
         """
-        if self._rm_url is None:
+        if self._rm_client is None:
             raise RuntimeError(
-                "Reward model URL not configured. "
+                "Reward model client not configured. "
                 "Pass rm_host and rm_port to BestOfNARDroidRoboarenaPolicy."
             )
 

@@ -83,6 +83,12 @@ pretrained_model_path: null
 only_tune_projectors: false
 disable_action_loss: false
 
+# Reward-weighted behavior cloning
+reward_weighting_mode: "none"
+reward_softmax_temperature: 1.0
+reward_column: null
+reward_discount: 0.99
+
 save_llm: false
 save_lora_only: false
 save_value_model: false

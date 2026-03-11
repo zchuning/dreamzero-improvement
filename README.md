@@ -105,6 +105,31 @@ To verify the server is working, run a test client. The first few inferences wil
 python test_client_AR.py --port 5000
 ```
 
+### Best-of-N with Reward Model
+
+To run inference with best-of-N sampling scored by a reward model, launch two processes:
+
+**1. Start the reward model server** (on a separate GPU):
+
+```bash
+cd /mnt/aws-lfs-02/shared/chuningz/private_robometer
+CUDA_VISIBLE_DEVICES=2 uv run python robometer/RoboMeter_Interface.py serve \
+  --model-path aliangdw/Robometer-4B --port 5555
+```
+
+**2. Start the BoN policy server** (on remaining GPUs):
+
+```bash
+cd /mnt/aws-lfs-02/shared/chuningz/dreamzero-improvement
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run --standalone --nproc_per_node=2 \
+  socket_test_optimized_AR_bon.py \
+  --model-path <path/to/checkpoint> \
+  --num-candidates 4 \
+  --rm-host localhost --rm-port 5555 \
+  --port 7000 \
+  --open-loop-horizon 8
+```
+
 ### Command-line Arguments
 
 - `--port`: Port number for the WebSocket server (default: 8000)

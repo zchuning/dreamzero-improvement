@@ -29,6 +29,8 @@ class Args:
     enable_dit_cache: bool = False
     max_chunk_size: int | None = None  # If None, use config value. Otherwise override max_chunk_size for inference.
     open_loop_horizon: int = 8  # If set, cache the full action chunk and return slices of this size.
+    return_conditioned: bool = False  # If True, condition prompt with "complete <task> with return <value>"
+    return_condition_value: float = 1.0  # Return value to condition on (typically 1.0 for best behavior)
 
 
 def init_mesh() -> DeviceMesh:
@@ -93,6 +95,8 @@ def main(args: Args) -> None:
             signal_group=signal_group,
             output_dir=output_dir,
             open_loop_horizon=args.open_loop_horizon,
+            return_conditioned=args.return_conditioned,
+            return_condition_value=args.return_condition_value,
         )
 
         server_config = PolicyServerConfig(

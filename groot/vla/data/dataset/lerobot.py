@@ -135,6 +135,10 @@ class LeRobotSingleDataset(Dataset):
         relative_action: bool = False,
         relative_action_keys: list[str] | None = None,
         relative_action_per_horizon: bool = False,
+        reward_column: str | None = None,
+        reward_weighting_mode: str = "none",
+        reward_discount: float = 0.99,
+        reward_softmax_temperature: float = 1.0,
     ):
         """
         Initialize the dataset.
@@ -244,6 +248,19 @@ class LeRobotSingleDataset(Dataset):
         self._detailed_global_instructions = self._get_detailed_global_instructions()
         self.curr_traj_data = None
         self.curr_traj_id = None
+
+        # Reward-weighted behavior cloning
+        self.reward_column = reward_column
+        self.reward_weighting_mode = reward_weighting_mode
+        self.reward_discount = reward_discount
+        self.reward_softmax_temperature = reward_softmax_temperature
+        self._episode_rewards: dict[int, np.ndarray] = {}
+        self._episode_returns: dict[int, np.ndarray] = {}
+        self._step_sampling_weights: dict[int, np.ndarray] = {}
+        self._trajectory_reward_weights: np.ndarray | None = None
+
+        if self.reward_column is not None:
+            self._load_rewards_and_returns()
 
         # Check if the dataset is valid
         self._check_integrity()
@@ -1224,6 +1241,73 @@ class LeRobotSingleDataset(Dataset):
             instructions_list = [json.loads(line) for line in f]
         return {entry["episode_index"]: entry for entry in instructions_list}
 
+    def _load_rewards_and_returns(self):
+        """Load per-frame rewards from parquets, compute MC returns (globally normalized),
+        and precompute sampling weights for reward-weighted behavior cloning."""
+        print(f"Loading reward column '{self.reward_column}' for {len(self._trajectory_ids)} trajectories...")
+
+        # 1. Load per-episode rewards
+        for traj_id in self._trajectory_ids:
+            parquet_path = self.get_parquet_path(traj_id)
+            traj_data = pd.read_parquet(parquet_path, columns=[self.reward_column])
+            rewards = traj_data[self.reward_column].to_numpy(dtype=np.float64)
+            self._episode_rewards[traj_id] = rewards
+
+        # 2. Compute Monte-Carlo returns (discounted sum of future rewards)
+        gamma = self.reward_discount
+        all_returns_list = []
+        for traj_id in self._trajectory_ids:
+            rewards = self._episode_rewards[traj_id]
+            returns = np.zeros_like(rewards)
+            # Bootstrap terminal value: assume last reward repeats forever
+            # r_T / (1 - gamma) = geometric series sum
+            returns[-1] = rewards[-1] / (1.0 - gamma) if gamma < 1.0 else rewards[-1]
+            for t in reversed(range(len(rewards) - 1)):
+                returns[t] = rewards[t] + gamma * returns[t + 1]
+            self._episode_returns[traj_id] = returns
+            all_returns_list.append(returns)
+
+        # 3. Globally normalize returns to [0, 1]
+        all_returns = np.concatenate(all_returns_list)
+        g_min, g_max = all_returns.min(), all_returns.max()
+        print(f"  MC returns before normalization: min={g_min:.4f}, max={g_max:.4f}")
+        for traj_id in self._trajectory_ids:
+            self._episode_returns[traj_id] = (
+                (self._episode_returns[traj_id] - g_min) / (g_max - g_min + 1e-8)
+            )
+
+        # 4. Precompute dataset-wide softmax weights (for loss_weighted and sampling_weighted)
+        if self.reward_weighting_mode in ("loss_weighted", "sampling_weighted"):
+            all_rewards = np.concatenate([self._episode_rewards[tid] for tid in self._trajectory_ids])
+            # Softmax across the entire dataset
+            exp_r = np.exp(all_rewards / self.reward_softmax_temperature)
+            global_weights = exp_r / exp_r.sum()
+            # Scale so mean weight = 1.0 (preserves gradient magnitude)
+            global_weights = global_weights * len(global_weights)
+
+            offset = 0
+            self._loss_weights: dict[int, np.ndarray] = {}
+            traj_weight_sums = []
+            for traj_id in self._trajectory_ids:
+                n = len(self._episode_rewards[traj_id])
+                traj_w = global_weights[offset:offset + n]
+                self._loss_weights[traj_id] = traj_w
+                if self.reward_weighting_mode == "sampling_weighted":
+                    # Renormalize within trajectory for step selection
+                    w_sum = traj_w.sum()
+                    self._step_sampling_weights[traj_id] = traj_w / (w_sum + 1e-8)
+                    traj_weight_sums.append(w_sum)
+                offset += n
+
+            if self.reward_weighting_mode == "sampling_weighted":
+                self._trajectory_reward_weights = np.array(traj_weight_sums)
+                self._trajectory_reward_weights /= self._trajectory_reward_weights.sum()
+
+            print(f"  Dataset-wide softmax weights computed (temperature={self.reward_softmax_temperature}, "
+                  f"min_weight={global_weights.min():.4f}, max_weight={global_weights.max():.4f})")
+
+        print(f"  Reward loading complete: {len(self._episode_rewards)} trajectories")
+
     def _check_integrity(self):
         """Use the config to check if the keys are valid and detect silent data corruption."""
         ERROR_MSG_HEADER = f"Error occurred in initializing dataset {self.dataset_name}:\n"
@@ -1289,14 +1373,15 @@ class LeRobotSingleDataset(Dataset):
         indices = {
             key: delta_indices + base_index for key, delta_indices in self.delta_indices.items()
         }
-        return self.transforms(self.get_step_data(trajectory_id, indices))
+        return self.transforms(self.get_step_data(trajectory_id, indices, base_index=base_index))
 
-    def get_step_data(self, trajectory_id: int, indices: dict[str, np.ndarray]) -> dict:
+    def get_step_data(self, trajectory_id: int, indices: dict[str, np.ndarray], base_index: int | None = None) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
 
         Args:
             trajectory_id (int): The name of the trajectory.
             indices (dict[str, np.ndarray]): The indices for each modality.
+            base_index (int | None): The base frame index for reward lookup.
 
         Returns:
             dict: The RAW data for the step.
@@ -1328,6 +1413,24 @@ class LeRobotSingleDataset(Dataset):
                     data[key] = self.get_data_by_modality(
                         trajectory_id, modality, key, indices[key]
                     )
+
+        # Inject reward/return for reward-weighted BC
+        if self.reward_column is not None and base_index is not None:
+            traj_len = len(self._episode_rewards.get(trajectory_id, []))
+            idx = min(max(base_index, 0), traj_len - 1) if traj_len > 0 else 0
+            # Precomputed dataset-wide softmax weight (scaled so mean=1)
+            if hasattr(self, '_loss_weights') and trajectory_id in self._loss_weights:
+                data["reward_weight"] = np.array(
+                    [self._loss_weights[trajectory_id][idx]], dtype=np.float32
+                )
+            else:
+                data["reward_weight"] = np.array(
+                    [self._episode_rewards[trajectory_id][idx]], dtype=np.float32
+                )
+            data["mc_return"] = np.array(
+                [self._episode_returns[trajectory_id][idx]], dtype=np.float32
+            )
+
         return data
 
     def get_parquet_path(self, trajectory_id: int) -> Path:
@@ -2022,6 +2125,21 @@ class LeRobotMixtureDataset(Dataset):
             trajectory_sampling_weights /= trajectory_sampling_weights.sum()
             self._trajectory_sampling_weights.append(trajectory_sampling_weights)
 
+        # 3b. Override trajectory weights for sampling_weighted mode
+        for i, dataset in enumerate(self.datasets):
+            if (
+                hasattr(dataset, "reward_weighting_mode")
+                and dataset.reward_weighting_mode == "sampling_weighted"
+                and dataset._trajectory_reward_weights is not None
+            ):
+                # Blend with existing weights (respect discarded trajectories)
+                mask = self._trajectory_sampling_weights[i] > 0
+                blended = dataset._trajectory_reward_weights.copy()
+                blended[~mask] = 0.0
+                if blended.sum() > 0:
+                    blended /= blended.sum()
+                    self._trajectory_sampling_weights[i] = blended
+
         # 4. Primary dataset indices
         self._primary_dataset_indices = np.array(dataset_sampling_weights) == 1.0
 
@@ -2216,7 +2334,21 @@ class LeRobotMixtureDataset(Dataset):
             allowed_indices = dataset.step_filter[trajectory_id]
             # Remove indices that are too large
             allowed_indices = allowed_indices[allowed_indices <= allowed_length]
-            step_index = rng.choice(allowed_indices)
+
+            # Reward-weighted step sampling
+            if (
+                hasattr(dataset, "reward_weighting_mode")
+                and dataset.reward_weighting_mode == "sampling_weighted"
+                and trajectory_id in dataset._step_sampling_weights
+            ):
+                # Get precomputed per-step weights and restrict to allowed indices
+                full_weights = dataset._step_sampling_weights[trajectory_id]
+                step_weights = full_weights[allowed_indices]
+                step_weights = step_weights / (step_weights.sum() + 1e-8)
+                step_index = rng.choice(allowed_indices, p=step_weights)
+            else:
+                step_index = rng.choice(allowed_indices)
+
             return dataset, trajectory_id, step_index
         else:
             length_cumsum = np.cumsum(self.dataset_lengths)
@@ -2241,7 +2373,7 @@ class LeRobotMixtureDataset(Dataset):
         indices = {
             key: delta_indices + step_index for key, delta_indices in dataset.delta_indices.items()
         }
-        return dataset.transforms(dataset.get_step_data(trajectory_id, indices))
+        return dataset.transforms(dataset.get_step_data(trajectory_id, indices, base_index=step_index))
 
     def __len__(self) -> int:
         """Get the length of a single epoch in the mixture.

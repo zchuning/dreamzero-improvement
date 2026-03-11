@@ -698,6 +698,11 @@ class BaseExperiment(ABC):
             if cfg.disable_action_loss:
                 model.action_head.config.disable_action_loss = True
                 mprint("disable_action_loss=True applied to loaded model")
+            # Apply reward-weighted BC config overrides
+            if cfg.reward_weighting_mode != "none":
+                model.action_head.config.reward_weighting_mode = cfg.reward_weighting_mode
+                model.action_head.config.reward_softmax_temperature = cfg.reward_softmax_temperature
+                mprint(f"reward_weighting_mode={cfg.reward_weighting_mode} applied to loaded model")
         else:
             model = instantiate(cfg.model)
         model.config.resume_path = model.config._name_or_path = training_args.output_dir

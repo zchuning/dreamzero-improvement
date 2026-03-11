@@ -139,6 +139,10 @@ class WANPolicyHeadConfig(PretrainedConfig):
     disable_action_loss: bool = field(default=False, metadata={"help": "If True, zero out the action loss (train video/dynamics only)."})
     defer_lora_injection: bool = field(default=False, metadata={"help": "Defer LoRA injection until after loading pretrained weights."})
 
+    # Reward-weighted behavior cloning
+    reward_weighting_mode: str = field(default="none", metadata={"help": "Reward weighting mode: 'none', 'loss_weighted', 'sampling_weighted', or 'return_conditioned'."})
+    reward_softmax_temperature: float = field(default=1.0, metadata={"help": "Temperature for softmax reward weighting."})
+
     vl_self_attention_cfg: dict = field(default=None)
     text_encoder_cfg: dict = field(default=None)
     image_encoder_cfg: dict = field(default=None)
@@ -743,8 +747,7 @@ class WANPolicyHead(ActionHead):
             ).mean(dim=(1,3,4))  # shape: [B, ...]
 
             weight_dynamics = dynamics_loss_per_sample * self.scheduler.training_weight(timestep.flatten(0, 1)).unflatten(0, (noise.shape[0], noise.shape[1])).to(self._device)
-            weighted_dynamics_loss = weight_dynamics.mean()
-            
+
             if actions.numel() > 0 and not self.config.disable_action_loss:
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
@@ -753,12 +756,28 @@ class WANPolicyHead(ActionHead):
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
-                weighted_action_loss = weight_action.mean()
-                loss = weighted_dynamics_loss + weighted_action_loss
             else:
-                weighted_action_loss = torch.tensor(0.0, device=self._device)
-                loss = weighted_dynamics_loss
-            # loss = dynamics_loss_per_sample.mean()
+                weight_action = None
+
+            # Apply reward-based loss weighting (precomputed dataset-wide softmax, mean=1)
+            if not hasattr(self, '_reward_mode_logged'):
+                print(f"[REWARD] reward_weighting_mode={self.config.reward_weighting_mode}, has_reward_weight={hasattr(action_input, 'reward_weight')}")
+                self._reward_mode_logged = True
+            if self.config.reward_weighting_mode == "loss_weighted" and hasattr(action_input, "reward_weight"):
+                sample_weights = action_input.reward_weight.to(self._device).float().squeeze(-1)  # [B]
+                weighted_dynamics_loss = (weight_dynamics.mean(dim=1) * sample_weights).mean()
+                if weight_action is not None:
+                    weighted_action_loss = (weight_action.mean(dim=1) * sample_weights).mean()
+                else:
+                    weighted_action_loss = torch.tensor(0.0, device=self._device)
+            else:
+                weighted_dynamics_loss = weight_dynamics.mean()
+                if weight_action is not None:
+                    weighted_action_loss = weight_action.mean()
+                else:
+                    weighted_action_loss = torch.tensor(0.0, device=self._device)
+
+            loss = weighted_dynamics_loss + weighted_action_loss
 
         # Record log
         output_dict = {

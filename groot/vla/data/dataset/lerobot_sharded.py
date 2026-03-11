@@ -538,12 +538,13 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         assert self.shard_start_indices is not None
         return list(self.shard_start_indices.keys())
 
-    def get_step_data(self, trajectory_id: int, indices: dict[str, np.ndarray]) -> dict:
+    def get_step_data(self, trajectory_id: int, indices: dict[str, np.ndarray], base_index: int | None = None) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
 
         Args:
             trajectory_id (int): The name of the trajectory.
             indices (dict[str, np.ndarray]): The indices for each modality.
+            base_index (int | None): The base frame index for reward lookup.
 
         Returns:
             dict: The RAW data for the step.
@@ -578,6 +579,24 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                     # Skip this sample if state or action data is empty
                     if data[key] is not None and hasattr(data[key], '__len__') and len(data[key]) == 0:
                         return None
+
+        # Inject reward/return for reward-weighted BC
+        if self.reward_column is not None and base_index is not None:
+            traj_len = len(self._episode_rewards.get(trajectory_id, []))
+            idx = min(max(base_index, 0), traj_len - 1) if traj_len > 0 else 0
+            # Precomputed dataset-wide softmax weight (scaled so mean=1)
+            if hasattr(self, '_loss_weights') and trajectory_id in self._loss_weights:
+                data["reward_weight"] = np.array(
+                    [self._loss_weights[trajectory_id][idx]], dtype=np.float32
+                )
+            else:
+                data["reward_weight"] = np.array(
+                    [self._episode_rewards[trajectory_id][idx]], dtype=np.float32
+                )
+            data["mc_return"] = np.array(
+                [self._episode_returns[trajectory_id][idx]], dtype=np.float32
+            )
+
         return data
 
     def get_video(self, trajectory_id: int, key: str, step_indices: np.ndarray) -> np.ndarray:
@@ -1512,7 +1531,7 @@ class ShardedLeRobotMixtureDataset(LeRobotMixtureDataset, IterableDataset):
                     key: delta_indices + step_index
                     for key, delta_indices in dataset.delta_indices.items()
                 }
-                step_data = dataset.get_step_data(trajectory_id, indices)
+                step_data = dataset.get_step_data(trajectory_id, indices, base_index=step_index)
                 # Skip samples where state or action would be empty
                 if step_data is not None:
                     yield dataset.transforms(step_data)

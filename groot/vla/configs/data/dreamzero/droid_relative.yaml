@@ -42,6 +42,10 @@ train_dataset:
     relative_action: ${relative_action}
     relative_action_keys: ${relative_action_keys}
     relative_action_per_horizon: ${relative_action_per_horizon}
+    reward_column: ${reward_column}
+    reward_weighting_mode: ${reward_weighting_mode}
+    reward_discount: ${reward_discount}
+    reward_softmax_temperature: ${reward_softmax_temperature}
   mixture_kwargs:
     training: true
     balance_dataset_weights: false
